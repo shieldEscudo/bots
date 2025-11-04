@@ -1,1 +1,1 @@
-worker: python agentBot.py
+worker: python bots/agentBot.py
