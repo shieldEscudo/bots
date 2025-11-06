@@ -57,10 +57,10 @@ CATEGORY_ID = 1427106889438728242
 PARENT_CHANNEL_ID = 1427498616003493960  # 実際のテキストチャンネルIDに置き換えてください
 
 
-TEAM_SIZE = 4                                 # 4vs4
+TEAM_SIZE = 1                                 # 4vs4
 PLAYERS_NEEDED = TEAM_SIZE * 2                # 8人
 TOTAL_GAMES = 5                               # 5試合
-VOTE_THRESHOLD = 5                            # 8人中5票で進行
+VOTE_THRESHOLD = 1                            # 8人中5票で進行
 DB_PATH = "match.db"
 
 MATCHMAKING_INTERVAL = 30
@@ -1100,11 +1100,11 @@ class ResultButtonView(discord.ui.View):
         if len(set(a_votes)) > 1 or len(set(b_votes)) > 1:
             return "retry"
 
-        # 全員勝ち or 全員負け → 再投票
-        if all(v == "win" for v in a_votes + b_votes):
-            return "retry"
-        if all(v == "lose" for v in a_votes + b_votes):
-            return "retry"
+        # # 全員勝ち or 全員負け → 再投票
+        # if all(v == "win" for v in a_votes + b_votes):
+        #     return "retry"
+        # if all(v == "lose" for v in a_votes + b_votes):
+        #     return "retry"
 
         # 得点方式（勝ちなら+1、負けなら-1）
         a_score = sum(1 if v == "win" else -1 for v in a_votes)
