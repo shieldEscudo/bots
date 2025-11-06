@@ -483,7 +483,7 @@ async def try_match_players_by_rating(guild: discord.Guild):
 
 # ==== 共通処理を関数に分離 ====
 async def handle_match_join(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    
 
     guild = interaction.guild or bot.get_guild(GUILD_ID)
     if not guild:
