@@ -51,7 +51,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = 1427106888704589846
 
 # CATEGORY_ID = 1405124702984470559
-CATEGORY_ID = 1427106889438728242
+CATEGORY_ID = 1435885508730290236
 # スレッドを作成する親チャンネル
 # PARENT_CHANNEL_ID = 1405124702984470559  # 実際のテキストチャンネルIDに置き換えてください
 PARENT_CHANNEL_ID = 1427498616003493960  # 実際のテキストチャンネルIDに置き換えてください
@@ -484,7 +484,6 @@ async def try_match_players_by_rating(guild: discord.Guild):
 # ==== 共通処理を関数に分離 ====
 async def handle_match_join(interaction: discord.Interaction):
     
-
     guild = interaction.guild or bot.get_guild(GUILD_ID)
     if not guild:
         await interaction.response.send_message("⚠️ サーバーが見つかりません。", ephemeral=True)
@@ -1311,12 +1310,35 @@ class MatchControlView(discord.ui.View):
 # ========= 起動時復元 & 定期マッチング開始 =========
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    # 初回起動時だけメッセージを送る（必要なら）
-    channel = bot.get_channel(1407578550944399490)
-    if channel:
-        sent = await channel.send("マッチング操作はこちらから！", view=MatchControlView())
-        await sent.pin()  # ← ここでピン留め
-        print("✅ ボタンメッセージを送信しました")
+
+    # === 「エントリー」チャンネルが存在するか検索 ===
+    entry_channel = discord.utils.get(guild.text_channels, name="エントリー")
+
+    # === 無い場合は作成 ===
+    if entry_channel is None:
+        try:
+            entry_channel = await guild.create_text_channel("エントリー")
+            print(f"✅ 'エントリー' チャンネルを作成しました in {guild.name}")
+
+            # 書き込み制限 (任意)
+            await entry_channel.set_permissions(
+                guild.default_role,
+                send_messages=False  # 一般ユーザー送信禁止
+            )
+
+        except discord.Forbidden:
+            print("❌ チャンネル作成権限がありません")
+            return
+
+    # === すでにある場合 ===
+    else:
+        print(f"ℹ️ 既に 'エントリー' が存在しています in {guild.name}")
+
+    # === メッセージ送信（defer不要） ===
+    sent = await entry_channel.send("マッチング操作はこちらから！", view=MatchControlView())
+    await sent.pin()
+    print("✅ ボタンメッセージを送信・ピン留めしました")
+
 
 @bot.event
 async def on_ready():
