@@ -9,7 +9,7 @@ from typing import Dict, List, Set, Any, Tuple, Optional
 import math  # only used for formatting, not for rating
 import discord
 from discord.ext import commands, tasks
-
+import discord.guild
 import psycopg2
 from dotenv import load_dotenv
 
@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+import aiohttp
 
 # Health check用のダミーWebサーバー
 class HealthHandler(BaseHTTPRequestHandler):
@@ -64,6 +66,40 @@ VOTE_THRESHOLD = 1                            # 8人中5票で進行
 DB_PATH = "match.db"
 
 MATCHMAKING_INTERVAL = 30
+
+# ========= Koyeb スリープ対策設定 =========
+# 💡 サービス作成後に発行されるBotの公開URLを環境変数から取得
+HEALTH_CHECK_URL = os.getenv("HEALTH_CHECK_URL")
+
+if not HEALTH_CHECK_URL:
+    print("⚠️ HEALTH_CHECK_URLが設定されていません。Koyebのスリープ対策は機能しません。")
+    # ローカル実行時のフォールバックは通常不要。本番環境では必須。
+
+# ========= 定期実行タスクの定義 =========
+@tasks.loop(minutes=10.0)
+async def health_check_loop():
+    """Koyebのスリープを防ぐため、10分ごとに自身の公開URLへリクエストを送信する。"""
+    if not HEALTH_CHECK_URL:
+        # URLが設定されていない場合は実行しない
+        return
+
+    try:
+        # aiohttpを使って非同期HTTP GETリクエストを実行
+        async with aiohttp.ClientSession() as session:
+            async with session.get(HEALTH_CHECK_URL) as response:
+                status = response.status
+                
+                # ログ出力 (Node.jsの例と同様)
+                if response.ok:
+                    print(f"✅ [Ping] ヘルスチェック成功: {status} ({HEALTH_CHECK_URL})")
+                else:
+                    print(f"⚠️ [Ping] ヘルスチェック失敗: {status} ({HEALTH_CHECK_URL})")
+
+    # 接続エラーなど、リクエストが失敗した場合の処理
+    except aiohttp.ClientConnectorError:
+        print(f"❌ [Ping] ヘルスチェックエラー: 接続に失敗しました ({HEALTH_CHECK_URL})")
+    except Exception as e:
+        print(f"❌ [Ping] ヘルスチェックで予期せぬエラーが発生しました: {e}")
 
 # ========= TrueSkill =========
 # pip install trueskill
@@ -1356,6 +1392,12 @@ async def on_ready():
             bot.add_view(ReportButtonView(match_id))
         except Exception as e:
             print(f"PersistentView再登録失敗 match_id={match_id}: {e}")
+            
+    # 💡 ヘルスチェックの定期実行を開始
+    if HEALTH_CHECK_URL:
+        health_check_loop.start()
+        print(f"🕐 ヘルスチェックの定期実行を開始しました (10分間隔 -> {HEALTH_CHECK_URL})")
+
     try:
         synced = await bot.tree.sync()
         print(f"/コマンド同期: {len(synced)} 個")
