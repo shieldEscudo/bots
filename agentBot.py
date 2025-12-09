@@ -784,15 +784,15 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
     elif isinstance(first_player, int):
         host_member = guild.get_member(first_player)
 
-    # if host_member:
-    #     await lobby.send(
-    #         f"ホストは {host_member.mention} さんです！\n"
-    #         f"下のボタンからヘヤタテURLを入力してください。"
-    #     )
-    #     # ホスト専用ボタンを追加
-    #     host_view = HostLinkView(host_member, lobby)
-    #     bot.add_view(host_view)
-    #     await lobby.send(view=host_view)
+    if host_member:
+        await lobby.send(
+            f"ホストは {host_member.mention} さんです！\n"
+            f"下のボタンからヘヤタテURLを入力してください。"
+        )
+        # ホスト専用ボタンを追加
+        host_view = HostLinkView(host_member, lobby)
+        bot.add_view(host_view)
+        await lobby.send(view=host_view)
 
     # マッチ情報を保存
     current_matches[match_id] = {
@@ -849,30 +849,61 @@ async def create_and_announce_game(guild: discord.Guild, match_id: int, game_num
     team_a_members = real_members_only(guild, team_a_list)
     team_b_members = real_members_only(guild, team_b_list)
 
-    # チームスレッドをロビー配下に作成
-    ch_a = await lobby.create_thread(
-        name=f"試合{game_num}-チームA",
-        type=discord.ChannelType.private_thread
-    )
-    ch_b = await lobby.create_thread(
-        name=f"試合{game_num}-チームB",
-        type=discord.ChannelType.private_thread
-    )
-    # チームA
-    for m in team_a_members:
-        try:
-            await ch_a.add_user(m)
-            await asyncio.sleep(0.5)  # 200ms 待機してAPI連打を回避
-        except Exception as e:
-            print(f"チームA追加失敗: {m} {e}")
+    # # チームスレッドをロビー配下に作成
+    # ch_a = await lobby.create_thread(
+    #     name=f"試合{game_num}-チームA",
+    #     type=discord.ChannelType.private_thread
+    # )
+    # ch_b = await lobby.create_thread(
+    #     name=f"試合{game_num}-チームB",
+    #     type=discord.ChannelType.private_thread
+    # )
+    # # チームA
+    # for m in team_a_members:
+    #     try:
+    #         await ch_a.add_user(m)
+    #         await asyncio.sleep(0.5)  # 200ms 待機してAPI連打を回避
+    #     except Exception as e:
+    #         print(f"チームA追加失敗: {m} {e}")
 
-    # チームB
+    # # チームB
+    # for m in team_b_members:
+    #     try:
+    #         await ch_b.add_user(m)
+    #         await asyncio.sleep(0.5)
+    #     except Exception as e:
+    #         print(f"チームB追加失敗: {m} {e}")
+    
+        # ==============================
+    # 🔊 スレッド → ボイスチャンネルに変更
+    # ==============================
+
+    # 親カテゴリを取得（ロビーの category）
+    category = lobby.category
+
+    # チームAボイスチャンネル
+    ch_a = await guild.create_voice_channel(
+        name=f"試合{game_num}-チームA",
+        category=category
+    )
+
+    # チームBボイスチャンネル
+    ch_b = await guild.create_voice_channel(
+        name=f"試合{game_num}-チームB",
+        category=category
+    )
+
+    # 🔐 各チャンネルの参加権限付与
+    for m in team_a_members:
+        await ch_a.set_permissions(m, view_channel=True, connect=True, speak=True)
+
     for m in team_b_members:
-        try:
-            await ch_b.add_user(m)
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            print(f"チームB追加失敗: {m} {e}")
+        await ch_b.set_permissions(m, view_channel=True, connect=True, speak=True)
+
+    # 🔇 その他の人は入れないように
+    await ch_a.set_permissions(guild.default_role, view_channel=False)
+    await ch_b.set_permissions(guild.default_role, view_channel=False)
+
 
     mi["teams"] = {"A": [id_of(p) for p in team_a_list], "B": [id_of(p) for p in team_b_list]}
     mi["games"].append({
@@ -905,6 +936,20 @@ async def create_and_announce_game(guild: discord.Guild, match_id: int, game_num
 
 
 
+# async def cleanup_game_threads(guild: discord.Guild, match_id: int, game_num: int):
+#     mi = current_matches.get(match_id)
+#     if not mi:
+#         return
+#     for g in mi.get("games", []):
+#         if g["game_num"] == game_num:
+#             for key in ("ch_a_id", "ch_b_id"):
+#                 th = get_textlike(guild, g.get(key))
+#                 if isinstance(th, discord.Thread):
+#                     try:
+#                         await th.delete()
+#                     except discord.Forbidden:
+#                         pass
+
 async def cleanup_game_threads(guild: discord.Guild, match_id: int, game_num: int):
     mi = current_matches.get(match_id)
     if not mi:
@@ -912,10 +957,10 @@ async def cleanup_game_threads(guild: discord.Guild, match_id: int, game_num: in
     for g in mi.get("games", []):
         if g["game_num"] == game_num:
             for key in ("ch_a_id", "ch_b_id"):
-                th = get_textlike(guild, g.get(key))
-                if isinstance(th, discord.Thread):
+                ch = guild.get_channel(g.get(key))
+                if isinstance(ch, discord.VoiceChannel):
                     try:
-                        await th.delete()
+                        await ch.delete()
                     except discord.Forbidden:
                         pass
 
