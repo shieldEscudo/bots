@@ -784,15 +784,15 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
     elif isinstance(first_player, int):
         host_member = guild.get_member(first_player)
 
-    if host_member:
-        await lobby.send(
-            f"ホストは {host_member.mention} さんです！\n"
-            f"下のボタンからヘヤタテURLを入力してください。"
-        )
-        # ホスト専用ボタンを追加
-        host_view = HostLinkView(host_member, lobby)
-        bot.add_view(host_view)
-        await lobby.send(view=host_view)
+    # if host_member:
+    #     await lobby.send(
+    #         f"ホストは {host_member.mention} さんです！\n"
+    #         f"下のボタンからヘヤタテURLを入力してください。"
+    #     )
+    #     # ホスト専用ボタンを追加
+    #     host_view = HostLinkView(host_member, lobby)
+    #     bot.add_view(host_view)
+    #     await lobby.send(view=host_view)
 
     # マッチ情報を保存
     current_matches[match_id] = {
