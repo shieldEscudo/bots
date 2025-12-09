@@ -62,7 +62,7 @@ PARENT_CHANNEL_ID = 1419522773298053220 # 実際のテキストチャンネルID
 
 TEAM_SIZE = 1                                 # 4vs4
 PLAYERS_NEEDED = TEAM_SIZE * 2                # 8人
-TOTAL_GAMES = 5                               # 5試合
+TOTAL_GAMES = 1                               # 5試合
 VOTE_THRESHOLD = 1                            # 8人中5票で進行
 DB_PATH = "match.db"
 
