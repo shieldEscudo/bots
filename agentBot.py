@@ -60,7 +60,6 @@ CATEGORY_ID = 1419522773298053220
 PARENT_CHANNEL_ID = 1419522773298053220 # 実際のテキストチャンネルIDに置き換えてください
 
 
-
 TEAM_SIZE = 1                                 # 4vs4
 PLAYERS_NEEDED = TEAM_SIZE * 2                # 8人
 TOTAL_GAMES = 5                               # 5試合
@@ -267,13 +266,17 @@ def is_textlike_channel(ch: Any) -> bool:
 
 
 # 固定チーム順
+# PRESET_TEAMS = [
+#     ([1, 2, 7, 8], [3, 4, 5, 6]),  # 18
+#     ([1, 3, 5, 8], [2, 4, 6, 7]),  # 17/19
+#     ([1, 3, 6, 7], [2, 4, 5, 8]),  # 17/19
+#     ([1, 4, 5, 7], [2, 3, 6, 8]),  # 17/19
+#     ([1, 4, 6, 8], [2, 3, 5, 7])   # 17/19
+# ]
+
 PRESET_TEAMS = [
-    ([1, 2, 7, 8], [3, 4, 5, 6]),  # 18
-    ([1, 3, 5, 8], [2, 4, 6, 7]),  # 17/19
-    ([1, 3, 6, 7], [2, 4, 5, 8]),  # 17/19
-    ([1, 4, 5, 7], [2, 3, 6, 8]),  # 17/19
-    ([1, 4, 6, 8], [2, 3, 5, 7])   # 17/19
-]
+    ([1], [2]),  # 18
+   ]
 
 def get_preset_teams(players: List[Any], game_num: int) -> Dict[str, List[Any]]:
     index_map = {i+1: players[i] for i in range(len(players))}
@@ -1131,9 +1134,9 @@ class ResultButtonView(discord.ui.View):
         a_votes = [v for uid, v in votes.items() if uid in team_a]
         b_votes = [v for uid, v in votes.items() if uid in team_b]
 
-        # どちらかのチームが投票していない → 再投票
-        if not a_votes or not b_votes:
-            return "retry"
+        # # どちらかのチームが投票していない → 再投票
+        # if not a_votes or not b_votes:
+        #     return "retry"
 
         # チーム内で割れている場合 → 再投票
         if len(set(a_votes)) > 1 or len(set(b_votes)) > 1:
