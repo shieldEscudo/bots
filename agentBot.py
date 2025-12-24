@@ -1743,7 +1743,7 @@ async def on_ready():
     bot.add_view(MatchControlView())
 
     bot.pool = await asyncpg.create_pool(DATABASE_URL)    
-
+    bot.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
     load_from_db()
     for match_id, mi in current_matches.items():
         try:
