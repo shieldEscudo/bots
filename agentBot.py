@@ -63,7 +63,7 @@ PARENT_CHANNEL_ID = 1419522773298053220 # 実際のテキストチャンネルID
 
 TEAM_SIZE = 1                                 # 4vs4
 PLAYERS_NEEDED = TEAM_SIZE * 2                # 8人
-TOTAL_GAMES = 1                               # 5試合
+TOTAL_GAMES = 3                               # 5試合
 VOTE_THRESHOLD = 1                            # 8人中5票で進行
 DB_PATH = "match.db"
 
@@ -1503,33 +1503,64 @@ class RegisterButtonView(discord.ui.View):
 @bot.event
 async def on_guild_join(guild: discord.Guild):
 
-    # === 「エントリー」チャンネルが存在するか検索 ===
-    entry_channel = discord.utils.get(guild.text_channels, name="エントリー")
 
-    # === 無い場合は作成 ===
-    if entry_channel is None:
+    # ==============================
+    # VersusCord カテゴリを取得 or 作成
+    # ==============================
+    category = discord.utils.get(guild.categories, name="VersusCord")
+
+    if category is None:
         try:
-            entry_channel = await guild.create_text_channel("エントリー")
-            print(f"✅ 'エントリー' チャンネルを作成しました in {guild.name}")
+            category = await guild.create_category("VersusCord")
+            print(f"✅ VersusCordカテゴリを作成しました in {guild.name}")
+        except discord.Forbidden:
+            print("❌ カテゴリ作成権限がありません")
+            return
+    else:
+        print(f"ℹ️ VersusCordカテゴリは既に存在します in {guild.name}")
 
-            # 書き込み制限 (任意)
-            await entry_channel.set_permissions(
-                guild.default_role,
-                send_messages=False  # 一般ユーザー送信禁止
+    # ==============================
+    # テキストチャンネルを取得 or 作成
+    # ==============================
+    channel = discord.utils.get(
+        category.text_channels,
+        name="versus-control"
+    )
+
+    if channel is None:
+        try:
+            channel = await guild.create_text_channel(
+                name="versus-control",
+                category=category
             )
-
+            print("✅ versus-control チャンネルを作成しました")
         except discord.Forbidden:
             print("❌ チャンネル作成権限がありません")
             return
 
-    # === すでにある場合 ===
-    else:
-        print(f"ℹ️ 既に 'エントリー' が存在しています in {guild.name}")
+    # ==============================
+    # View を送信
+    # ==============================
+    try:
+        msg1 = await channel.send(
+            "🎮 **マッチ操作はこちら**",
+            view=MatchControlView()
+        )
 
-    # === メッセージ送信（defer不要） ===
-    sent = await entry_channel.send("マッチング操作はこちらから！", view=MatchControlView())
-    await sent.pin()
-    print("✅ ボタンメッセージを送信・ピン留めしました")
+        msg2 = await channel.send(
+            "📝 **Valorant 登録はこちら**",
+            view=RegisterButtonView()
+        )
+
+        # 任意：ピン留め
+        await msg1.pin()
+        await msg2.pin()
+
+        print("✅ MatchControlView / RegisterButtonView を送信しました")
+
+    except discord.Forbidden:
+        print("❌ メッセージ送信権限がありません")
+
 
 
 @bot.event
