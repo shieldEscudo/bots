@@ -1742,8 +1742,12 @@ async def on_ready():
     print(f"Botログイン: {bot.user}")
     bot.add_view(MatchControlView())
 
-    bot.pool = await asyncpg.create_pool(DATABASE_URL)    
-    bot.pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
+    bot.pool = await asyncpg.create_pool(
+        dsn=os.getenv("DATABASE_URL"),
+        min_size=1,
+        max_size=5
+    )
+    print("✅ PostgreSQL pool connected")
     load_from_db()
     for match_id, mi in current_matches.items():
         try:
