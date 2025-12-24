@@ -68,6 +68,10 @@ VOTE_THRESHOLD = 1                            # 8人中5票で進行
 DB_PATH = "match.db"
 
 MATCHMAKING_INTERVAL = 30
+GLOBAL_MATCH_SIZE = 5
+
+TARGET_GUILD_ID = 1440945405230583924
+TARGET_CATEGORY_ID = 1440945408632422512
 
 # ========= Koyeb スリープ対策設定 =========
 # 💡 サービス作成後に発行されるBotの公開URLを環境変数から取得
@@ -599,6 +603,15 @@ async def send_register_button(interaction: discord.Interaction):
     )
     await interaction.response.send_message("✅ 設置しました", ephemeral=True)
 
+@bot.tree.command(name="global_queue_button", description="グローバル待機ボタンを設置")
+@app_commands.checks.has_permissions(administrator=True)
+async def send_global_button(interaction: discord.Interaction):
+    await interaction.channel.send(
+        "🌐 **全サーバー共通マッチング**",
+        view=GlobalQueueView()
+    )
+    await interaction.response.send_message("✅ 設置しました", ephemeral=True)
+
 
 @bot.tree.command(name="r", description="指定ユーザー、または自分のレートを確認します")
 async def str_command(interaction: discord.Interaction, target: str | None = None):
@@ -1051,6 +1064,122 @@ async def apply_trueskill_updates(
             cur.execute("UPDATE users SET wins = COALESCE(wins, 0) + 1 WHERE user_id=?", (uid,))
     conn.commit()
 
+async def try_global_match(bot: commands.Bot):
+    async with bot.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT user_id
+            FROM global_queue
+            ORDER BY joined_at
+            LIMIT $1
+            """,
+            GLOBAL_MATCH_SIZE
+        )
+
+        if len(rows) < GLOBAL_MATCH_SIZE:
+            return
+
+        user_ids = [r["user_id"] for r in rows]
+
+        await conn.execute(
+            "DELETE FROM global_queue WHERE user_id = ANY($1::BIGINT[])",
+            user_ids
+        )
+
+    await create_global_voice(bot, user_ids)
+
+async def create_global_voice(bot: commands.Bot, user_ids: list[int]):
+    guild = bot.get_guild(TARGET_GUILD_ID)
+    if not guild:
+        print("❌ ターゲットサーバーが見つかりません")
+        return
+
+    category = guild.get_channel(TARGET_CATEGORY_ID)
+    if not isinstance(category, discord.CategoryChannel):
+        print("❌ カテゴリが見つかりません")
+        return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False)
+    }
+
+    members_in_guild = []
+
+    for uid in user_ids:
+        member = guild.get_member(uid)
+        if member:
+            overwrites[member] = discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True
+            )
+            members_in_guild.append(member)
+
+    vc = await guild.create_voice_channel(
+        name="🌐 グローバルVC",
+        category=category,
+        overwrites=overwrites
+    )
+
+
+    invite = await vc.create_invite(
+        max_uses=1,
+        unique=True,
+        reason="グローバルマッチング"
+    )
+
+    for uid in user_ids:
+        if guild.get_member(uid) is None:
+            user = bot.get_user(uid) or await bot.fetch_user(uid)
+            try:
+                await user.send(
+                    f"🎧 グローバルマッチが成立しました！\n"
+                    f"こちらから参加してください👇\n{invite.url}"
+                )
+            except discord.Forbidden:
+                print(f"DM送信失敗: {uid}")
+
+
+class GlobalQueueView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="🌐 グローバル待機に参加",
+        style=discord.ButtonStyle.primary,
+        custom_id="global_queue_join"
+    )
+    async def join(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        user_id = interaction.user.id
+
+        async with interaction.client.pool.acquire() as conn:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM global_queue WHERE user_id = $1",
+                user_id
+            )
+            if exists:
+                await interaction.response.send_message(
+                    "すでにグローバル待機列に入っています。",
+                    ephemeral=True
+                )
+                return
+
+            await conn.execute(
+                "INSERT INTO global_queue (user_id) VALUES ($1)",
+                user_id
+            )
+
+        await interaction.response.send_message(
+            "🌐 グローバル待機列に参加しました。",
+            ephemeral=True
+        )
+
+        # チェック
+        await try_global_match(interaction.client)
 
 # ========= ボタン View =========
 class ResultButtonView(discord.ui.View):
@@ -1547,6 +1676,7 @@ async def on_ready():
             bot.add_view(CancelMatchView(match_id))
             bot.add_view(ReportButtonView(match_id))
             bot.add_view(RegisterButtonView())
+            bot.add_view(GlobalQueueView())
         except Exception as e:
             print(f"PersistentView再登録失敗 match_id={match_id}: {e}")
             
