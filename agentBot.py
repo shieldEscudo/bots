@@ -68,12 +68,6 @@ VOTE_THRESHOLD = 1                            # 8人中5票で進行
 DB_PATH = "match.db"
 
 MATCHMAKING_INTERVAL = 30
-GLOBAL_MATCH_SIZE = 5
-
-TARGET_GUILD_ID = 1440945405230583924
-TARGET_CATEGORY_ID = 1453502635058532385
-
-GLOBAL_VC_PREFIX = "🌐 グローバルVC"
 
 # ========= Koyeb スリープ対策設定 =========
 # 💡 サービス作成後に発行されるBotの公開URLを環境変数から取得
@@ -588,10 +582,6 @@ async def handle_match_leave(interaction: discord.Interaction):
 async def matchmaking_loop():
     for guild in bot.guilds:
         await try_match_players_by_rating(guild)
-@tasks.loop(seconds=10)
-async def global_matchmaking_loop():
-    await try_global_match(bot)
-
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -1327,171 +1317,6 @@ class HostLinkModal(discord.ui.Modal, title="ヘヤタテURL入力"):
         )
         await interaction.response.send_message("✅ URLを登録しました！", ephemeral=True)
 
-async def try_global_match(bot):
-    async with bot.pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT user_id
-            FROM global_queue
-            ORDER BY joined_at
-            LIMIT $1
-            """,
-            GLOBAL_MATCH_SIZE
-        )
-
-        if len(rows) < GLOBAL_MATCH_SIZE:
-            return
-
-        user_ids = [r["user_id"] for r in rows]
-
-        # 待機列から削除
-        await conn.execute(
-            "DELETE FROM global_queue WHERE user_id = ANY($1::BIGINT[])",
-            user_ids
-        )
-
-        # match_id を発行
-        match_id = await conn.fetchval(
-            """
-            INSERT INTO global_matches (user_ids)
-            VALUES ($1)
-            RETURNING match_id
-            """,
-            user_ids
-        )
-
-    await create_global_voice(bot, match_id, user_ids)
-
-async def create_global_voice(bot, match_id: int, user_ids: list[int]):
-    guild = bot.get_guild(TARGET_GUILD_ID)
-    category = guild.get_channel(TARGET_CATEGORY_ID)
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False)
-    }
-
-    for uid in user_ids:
-        member = guild.get_member(uid)
-        if member:
-            overwrites[member] = discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                speak=True
-            )
-
-    vc = await guild.create_voice_channel(
-        name=f"{GLOBAL_VC_PREFIX} #{match_id}",
-        category=category,
-        overwrites=overwrites
-    )
-
-    async with bot.pool.acquire() as conn:
-        await conn.execute(
-            """
-            UPDATE global_matches
-            SET voice_channel_id = $1
-            WHERE match_id = $2
-            """,
-            vc.id, match_id
-        )
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if before.channel and before.channel != after.channel:
-        channel = before.channel
-
-        if (
-            channel.guild.id == TARGET_GUILD_ID
-            and channel.category_id == TARGET_CATEGORY_ID
-            and channel.name.startswith(f"{GLOBAL_VC_PREFIX} #")
-            and len(channel.members) == 0
-        ):
-            await end_global_match(channel)
-async def end_global_match(channel: discord.VoiceChannel):
-    try:
-        match_id = int(channel.name.split("#")[-1])
-    except ValueError:
-        return
-
-    async with bot.pool.acquire() as conn:
-        await conn.execute(
-            """
-            UPDATE global_matches
-            SET ended_at = CURRENT_TIMESTAMP
-            WHERE match_id = $1
-            """,
-            match_id
-        )
-
-    await channel.delete(reason="グローバルマッチ終了")
-@bot.tree.command(name="global_queue_button", description="グローバル待機ボタンを設置")
-@app_commands.checks.has_permissions(administrator=True)
-async def send_global_button(interaction: discord.Interaction):
-    await interaction.channel.send(
-        "🌐 **全サーバー共通グローバルマッチ**",
-        view=GlobalQueueView()
-    )
-    await interaction.response.send_message("✅ 設置しました", ephemeral=True)
-
-class GlobalQueueView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="🌐 グローバル待機に参加",
-        style=discord.ButtonStyle.primary,
-        custom_id="global_queue_join"
-    )
-    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = interaction.user.id
-
-        async with interaction.client.pool.acquire() as conn:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM global_queue WHERE user_id = $1",
-                user_id
-            )
-            if exists:
-                await interaction.response.send_message(
-                    "すでにグローバル待機中です。",
-                    ephemeral=True
-                )
-                return
-
-            await conn.execute(
-                "INSERT INTO global_queue (user_id) VALUES ($1)",
-                user_id
-            )
-
-        await interaction.response.send_message(
-            "🌐 グローバル待機に参加しました。",
-            ephemeral=True
-        )
-
-        await try_global_match(interaction.client)
-
-    @discord.ui.button(
-        label="❌ 待機キャンセル",
-        style=discord.ButtonStyle.danger,
-        custom_id="global_queue_cancel"
-    )
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_id = interaction.user.id
-
-        async with interaction.client.pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM global_queue WHERE user_id = $1",
-                user_id
-            )
-
-        if result.endswith("0"):
-            await interaction.response.send_message(
-                "待機列には入っていません。",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                "❌ グローバル待機をキャンセルしました。",
-                ephemeral=True
-            )
 
 class HostLinkView(discord.ui.View):
     def __init__(self, host: discord.Member, lobby_channel: discord.TextChannel):
@@ -1678,63 +1503,33 @@ class RegisterButtonView(discord.ui.View):
 @bot.event
 async def on_guild_join(guild: discord.Guild):
 
-    # # === 「エントリー」チャンネルが存在するか検索 ===
-    versus = discord.utils.get(guild.categories, name="VersusCord")
+    # === 「エントリー」チャンネルが存在するか検索 ===
+    entry_channel = discord.utils.get(guild.text_channels, name="エントリー")
 
     # === 無い場合は作成 ===
-    if versus is None:
-    #     try:
-    #         entry_channel = await guild.create_text_channel("エントリー")
-    #         print(f"✅ 'エントリー' チャンネルを作成しました in {guild.name}")
-
-    #         # 書き込み制限 (任意)
-    #         await entry_channel.set_permissions(
-    #             guild.default_role,
-    #             send_messages=False  # 一般ユーザー送信禁止
-    #         )
-
-    #     except discord.Forbidden:
-    #         print("❌ チャンネル作成権限がありません")
-    #         return
-
-    # # === すでにある場合 ===
-    # else:
-    #     print(f"ℹ️ 既に 'エントリー' が存在しています in {guild.name}")
-
-    # # === メッセージ送信（defer不要） ===
-    # sent = await entry_channel.send("マッチング操作はこちらから！", view=MatchControlView())
-    # await sent.pin()
-    # print("✅ ボタンメッセージを送信・ピン留めしました")
+    if entry_channel is None:
         try:
-                # ① カテゴリー作成
-                category = await guild.create_category("VersusCord")
+            entry_channel = await guild.create_text_channel("エントリー")
+            print(f"✅ 'エントリー' チャンネルを作成しました in {guild.name}")
 
-                # ② チャンネル作成
-                channel = await guild.create_text_channel(
-                    name="🎮-versuscord",
-                    category=category
-                )
-
-                # ③ ボタン付きメッセージ送信
-                await channel.send(
-                    "🎮 **Valorant プレイヤー登録**",
-                    view=RegisterButtonView()
-                )
-
-                await channel.send(
-                    "🚪 **マッチエントリー**\n参加したい場合はこちら",
-                    view=MatchControlView()  # ← 既存のエントリーボタンView
-                )
-
-                await channel.send(
-                    "🌐 **グローバルマッチ**",
-                    view=GlobalQueueView()  # ← 既存のグローバルマッチView
-                )
-
-                print(f"✅ VersusCord セットアップ完了: {guild.name}")
+            # 書き込み制限 (任意)
+            await entry_channel.set_permissions(
+                guild.default_role,
+                send_messages=False  # 一般ユーザー送信禁止
+            )
 
         except discord.Forbidden:
-                print("❌ 権限不足：カテゴリ or チャンネル作成不可")
+            print("❌ チャンネル作成権限がありません")
+            return
+
+    # === すでにある場合 ===
+    else:
+        print(f"ℹ️ 既に 'エントリー' が存在しています in {guild.name}")
+
+    # === メッセージ送信（defer不要） ===
+    sent = await entry_channel.send("マッチング操作はこちらから！", view=MatchControlView())
+    await sent.pin()
+    print("✅ ボタンメッセージを送信・ピン留めしました")
 
 
 @bot.event
@@ -1742,12 +1537,8 @@ async def on_ready():
     print(f"Botログイン: {bot.user}")
     bot.add_view(MatchControlView())
 
-    bot.pool = await asyncpg.create_pool(
-        dsn=os.getenv("DATABASE_URL"),
-        min_size=1,
-        max_size=5
-    )
-    print("✅ PostgreSQL pool connected")
+    bot.pool = await asyncpg.create_pool(DATABASE_URL)    
+
     load_from_db()
     for match_id, mi in current_matches.items():
         try:
@@ -1756,7 +1547,6 @@ async def on_ready():
             bot.add_view(CancelMatchView(match_id))
             bot.add_view(ReportButtonView(match_id))
             bot.add_view(RegisterButtonView())
-            bot.add_view(GlobalQueueView())
         except Exception as e:
             print(f"PersistentView再登録失敗 match_id={match_id}: {e}")
             
@@ -1773,8 +1563,6 @@ async def on_ready():
         
     if not matchmaking_loop.is_running():
         matchmaking_loop.start()
-    if not global_matchmaking_loop.is_running():
-        global_matchmaking_loop.start()
 
 # ========= 実行 =========
 if __name__ == "__main__":
