@@ -73,6 +73,8 @@ GLOBAL_MATCH_SIZE = 5
 TARGET_GUILD_ID = 1440945405230583924
 TARGET_CATEGORY_ID = 1440945408632422512
 
+GLOBAL_VC_PREFIX = "🌐 グローバルVC"
+
 # ========= Koyeb スリープ対策設定 =========
 # 💡 サービス作成後に発行されるBotの公開URLを環境変数から取得
 HEALTH_CHECK_URL = os.getenv("HEALTH_CHECK_URL")
@@ -603,15 +605,6 @@ async def send_register_button(interaction: discord.Interaction):
     )
     await interaction.response.send_message("✅ 設置しました", ephemeral=True)
 
-@bot.tree.command(name="global_queue_button", description="グローバル待機ボタンを設置")
-@app_commands.checks.has_permissions(administrator=True)
-async def send_global_button(interaction: discord.Interaction):
-    await interaction.channel.send(
-        "🌐 **全サーバー共通マッチング**",
-        view=GlobalQueueView()
-    )
-    await interaction.response.send_message("✅ 設置しました", ephemeral=True)
-
 
 @bot.tree.command(name="r", description="指定ユーザー、または自分のレートを確認します")
 async def str_command(interaction: discord.Interaction, target: str | None = None):
@@ -1064,122 +1057,6 @@ async def apply_trueskill_updates(
             cur.execute("UPDATE users SET wins = COALESCE(wins, 0) + 1 WHERE user_id=?", (uid,))
     conn.commit()
 
-async def try_global_match(bot: commands.Bot):
-    async with bot.pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT user_id
-            FROM global_queue
-            ORDER BY joined_at
-            LIMIT $1
-            """,
-            GLOBAL_MATCH_SIZE
-        )
-
-        if len(rows) < GLOBAL_MATCH_SIZE:
-            return
-
-        user_ids = [r["user_id"] for r in rows]
-
-        await conn.execute(
-            "DELETE FROM global_queue WHERE user_id = ANY($1::BIGINT[])",
-            user_ids
-        )
-
-    await create_global_voice(bot, user_ids)
-
-async def create_global_voice(bot: commands.Bot, user_ids: list[int]):
-    guild = bot.get_guild(TARGET_GUILD_ID)
-    if not guild:
-        print("❌ ターゲットサーバーが見つかりません")
-        return
-
-    category = guild.get_channel(TARGET_CATEGORY_ID)
-    if not isinstance(category, discord.CategoryChannel):
-        print("❌ カテゴリが見つかりません")
-        return
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False)
-    }
-
-    members_in_guild = []
-
-    for uid in user_ids:
-        member = guild.get_member(uid)
-        if member:
-            overwrites[member] = discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                speak=True
-            )
-            members_in_guild.append(member)
-
-    vc = await guild.create_voice_channel(
-        name="🌐 グローバルVC",
-        category=category,
-        overwrites=overwrites
-    )
-
-
-    invite = await vc.create_invite(
-        max_uses=1,
-        unique=True,
-        reason="グローバルマッチング"
-    )
-
-    for uid in user_ids:
-        if guild.get_member(uid) is None:
-            user = bot.get_user(uid) or await bot.fetch_user(uid)
-            try:
-                await user.send(
-                    f"🎧 グローバルマッチが成立しました！\n"
-                    f"こちらから参加してください👇\n{invite.url}"
-                )
-            except discord.Forbidden:
-                print(f"DM送信失敗: {uid}")
-
-
-class GlobalQueueView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="🌐 グローバル待機に参加",
-        style=discord.ButtonStyle.primary,
-        custom_id="global_queue_join"
-    )
-    async def join(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-        user_id = interaction.user.id
-
-        async with interaction.client.pool.acquire() as conn:
-            exists = await conn.fetchval(
-                "SELECT 1 FROM global_queue WHERE user_id = $1",
-                user_id
-            )
-            if exists:
-                await interaction.response.send_message(
-                    "すでにグローバル待機列に入っています。",
-                    ephemeral=True
-                )
-                return
-
-            await conn.execute(
-                "INSERT INTO global_queue (user_id) VALUES ($1)",
-                user_id
-            )
-
-        await interaction.response.send_message(
-            "🌐 グローバル待機列に参加しました。",
-            ephemeral=True
-        )
-
-        # チェック
-        await try_global_match(interaction.client)
 
 # ========= ボタン View =========
 class ResultButtonView(discord.ui.View):
@@ -1446,6 +1323,171 @@ class HostLinkModal(discord.ui.Modal, title="ヘヤタテURL入力"):
         )
         await interaction.response.send_message("✅ URLを登録しました！", ephemeral=True)
 
+async def try_global_match(bot):
+    async with bot.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT user_id
+            FROM global_queue
+            ORDER BY joined_at
+            LIMIT $1
+            """,
+            GLOBAL_MATCH_SIZE
+        )
+
+        if len(rows) < GLOBAL_MATCH_SIZE:
+            return
+
+        user_ids = [r["user_id"] for r in rows]
+
+        # 待機列から削除
+        await conn.execute(
+            "DELETE FROM global_queue WHERE user_id = ANY($1::BIGINT[])",
+            user_ids
+        )
+
+        # match_id を発行
+        match_id = await conn.fetchval(
+            """
+            INSERT INTO global_matches (user_ids)
+            VALUES ($1)
+            RETURNING match_id
+            """,
+            user_ids
+        )
+
+    await create_global_voice(bot, match_id, user_ids)
+
+async def create_global_voice(bot, match_id: int, user_ids: list[int]):
+    guild = bot.get_guild(TARGET_GUILD_ID)
+    category = guild.get_channel(TARGET_CATEGORY_ID)
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False)
+    }
+
+    for uid in user_ids:
+        member = guild.get_member(uid)
+        if member:
+            overwrites[member] = discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True
+            )
+
+    vc = await guild.create_voice_channel(
+        name=f"{GLOBAL_VC_PREFIX} #{match_id}",
+        category=category,
+        overwrites=overwrites
+    )
+
+    async with bot.pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE global_matches
+            SET voice_channel_id = $1
+            WHERE match_id = $2
+            """,
+            vc.id, match_id
+        )
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if before.channel and before.channel != after.channel:
+        channel = before.channel
+
+        if (
+            channel.guild.id == TARGET_GUILD_ID
+            and channel.category_id == TARGET_CATEGORY_ID
+            and channel.name.startswith(f"{GLOBAL_VC_PREFIX} #")
+            and len(channel.members) == 0
+        ):
+            await end_global_match(channel)
+async def end_global_match(channel: discord.VoiceChannel):
+    try:
+        match_id = int(channel.name.split("#")[-1])
+    except ValueError:
+        return
+
+    async with bot.pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE global_matches
+            SET ended_at = CURRENT_TIMESTAMP
+            WHERE match_id = $1
+            """,
+            match_id
+        )
+
+    await channel.delete(reason="グローバルマッチ終了")
+@bot.tree.command(name="global_queue_button", description="グローバル待機ボタンを設置")
+@app_commands.checks.has_permissions(administrator=True)
+async def send_global_button(interaction: discord.Interaction):
+    await interaction.channel.send(
+        "🌐 **全サーバー共通グローバルマッチ**",
+        view=GlobalQueueView()
+    )
+    await interaction.response.send_message("✅ 設置しました", ephemeral=True)
+
+class GlobalQueueView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="🌐 グローバル待機に参加",
+        style=discord.ButtonStyle.primary,
+        custom_id="global_queue_join"
+    )
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+
+        async with interaction.client.pool.acquire() as conn:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM global_queue WHERE user_id = $1",
+                user_id
+            )
+            if exists:
+                await interaction.response.send_message(
+                    "すでにグローバル待機中です。",
+                    ephemeral=True
+                )
+                return
+
+            await conn.execute(
+                "INSERT INTO global_queue (user_id) VALUES ($1)",
+                user_id
+            )
+
+        await interaction.response.send_message(
+            "🌐 グローバル待機に参加しました。",
+            ephemeral=True
+        )
+
+        await try_global_match(interaction.client)
+
+    @discord.ui.button(
+        label="❌ 待機キャンセル",
+        style=discord.ButtonStyle.danger,
+        custom_id="global_queue_cancel"
+    )
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+
+        async with interaction.client.pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM global_queue WHERE user_id = $1",
+                user_id
+            )
+
+        if result.endswith("0"):
+            await interaction.response.send_message(
+                "待機列には入っていません。",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ グローバル待機をキャンセルしました。",
+                ephemeral=True
+            )
 
 class HostLinkView(discord.ui.View):
     def __init__(self, host: discord.Member, lobby_channel: discord.TextChannel):
