@@ -23,6 +23,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import aiohttp
 
+
 # Health check用のダミーWebサーバー
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -589,7 +590,15 @@ async def on_member_join(member: discord.Member):
     
     ensure_user_row(member.id)
 
-   
+@bot.tree.command(name="valorant_register_button", description="Valorant登録ボタンを設置")
+@app_commands.checks.has_permissions(administrator=True)
+async def send_register_button(interaction: discord.Interaction):
+    await interaction.channel.send(
+        "🎮 **Valorant プレイヤー登録**",
+        view=RegisterButtonView()
+    )
+    await interaction.response.send_message("✅ 設置しました", ephemeral=True)
+
 
 @bot.tree.command(name="r", description="指定ユーザー、または自分のレートを確認します")
 async def str_command(interaction: discord.Interaction, target: str | None = None):
@@ -784,15 +793,15 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
     elif isinstance(first_player, int):
         host_member = guild.get_member(first_player)
 
-    # if host_member:
-    #     await lobby.send(
-    #         f"ホストは {host_member.mention} さんです！\n"
-    #         f"下のボタンからヘヤタテURLを入力してください。"
-    #     )
-    #     # ホスト専用ボタンを追加
-    #     host_view = HostLinkView(host_member, lobby)
-    #     bot.add_view(host_view)
-    #     await lobby.send(view=host_view)
+    if host_member:
+        await lobby.send(
+            f"ホストは {host_member.mention} さんです！\n"
+            f"下のボタンからヘヤタテURLを入力してください。"
+        )
+        # ホスト専用ボタンを追加
+        host_view = HostLinkView(host_member, lobby)
+        bot.add_view(host_view)
+        await lobby.send(view=host_view)
 
     # マッチ情報を保存
     current_matches[match_id] = {
@@ -1390,7 +1399,104 @@ class MatchControlView(discord.ui.View):
     async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_match_leave(interaction)
 
+class RegisterModal(discord.ui.Modal, title="Valorant 登録フォーム"):
+    valorant_name = discord.ui.TextInput(
+        label="Valorantの名前",
+        placeholder="例: TenZ",
+        required=True
+    )
+    valorant_tag = discord.ui.TextInput(
+        label="タグ（#以降）",
+        placeholder="例: NA1",
+        required=True
+    )
 
+    def __init__(self, rank: str):
+        super().__init__()
+        self.rank = rank
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            async with interaction.client.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO valorant_players
+                    (discord_id, valorant_name, valorant_tag, rank)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (discord_id)
+                    DO UPDATE SET
+                        valorant_name = EXCLUDED.valorant_name,
+                        valorant_tag = EXCLUDED.valorant_tag,
+                        rank = EXCLUDED.rank,
+                        updated_at = CURRENT_TIMESTAMP;
+                    """,
+                    interaction.user.id,
+                    self.valorant_name.value,
+                    self.valorant_tag.value,
+                    self.rank
+                )
+
+            await interaction.response.send_message(
+                f"✅ 登録完了！\n"
+                f"{self.valorant_name.value}#{self.valorant_tag.value}\n"
+                f"ランク: **{self.rank}**",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            await interaction.response.send_message(
+                f"⚠️ 登録中にエラーが発生しました\n```\n{e}\n```",
+                ephemeral=True
+            )
+
+
+# ===============================
+# ランク選択ドロップダウン
+# ===============================
+class RankSelect(discord.ui.Select):
+    def __init__(self):
+        ranks = [
+            "Iron", "Bronze", "Silver", "Gold",
+            "Platinum", "Diamond", "Ascendant",
+            "Immortal", "Radiant"
+        ]
+        options = [discord.SelectOption(label=r, value=r) for r in ranks]
+        super().__init__(
+            placeholder="ランクを選択してください",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        modal = RegisterModal(rank=self.values[0])
+        await interaction.response.send_modal(modal)
+
+
+# ===============================
+# 登録ボタン View
+# ===============================
+class RegisterButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="🎯 Valorant 登録",
+        style=discord.ButtonStyle.primary,
+        custom_id="valorant_register_button"
+    )
+    async def register_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        view = discord.ui.View()
+        view.add_item(RankSelect())
+        await interaction.response.send_message(
+            "ランクを選択してください：",
+            view=view,
+            ephemeral=True
+        )
 
 
 # ========= 起動時復元 & 定期マッチング開始 =========
@@ -1440,6 +1546,7 @@ async def on_ready():
             bot.add_view(view)
             bot.add_view(CancelMatchView(match_id))
             bot.add_view(ReportButtonView(match_id))
+            bot.add_view(RegisterButtonView())
         except Exception as e:
             print(f"PersistentView再登録失敗 match_id={match_id}: {e}")
             
