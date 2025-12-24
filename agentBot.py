@@ -71,7 +71,7 @@ MATCHMAKING_INTERVAL = 30
 GLOBAL_MATCH_SIZE = 5
 
 TARGET_GUILD_ID = 1440945405230583924
-TARGET_CATEGORY_ID = 1440945408632422512
+TARGET_CATEGORY_ID = 1453502635058532385
 
 GLOBAL_VC_PREFIX = "🌐 グローバルVC"
 
@@ -1679,10 +1679,10 @@ class RegisterButtonView(discord.ui.View):
 async def on_guild_join(guild: discord.Guild):
 
     # # === 「エントリー」チャンネルが存在するか検索 ===
-    # entry_channel = discord.utils.get(guild.text_channels, name="エントリー")
+    versus = discord.utils.get(guild.categories, name="VersusCord")
 
-    # # === 無い場合は作成 ===
-    # if entry_channel is None:
+    # === 無い場合は作成 ===
+    if versus is None:
     #     try:
     #         entry_channel = await guild.create_text_channel("エントリー")
     #         print(f"✅ 'エントリー' チャンネルを作成しました in {guild.name}")
@@ -1705,36 +1705,36 @@ async def on_guild_join(guild: discord.Guild):
     # sent = await entry_channel.send("マッチング操作はこちらから！", view=MatchControlView())
     # await sent.pin()
     # print("✅ ボタンメッセージを送信・ピン留めしました")
-    try:
-            # ① カテゴリー作成
-            category = await guild.create_category("VersusCord")
+        try:
+                # ① カテゴリー作成
+                category = await guild.create_category("VersusCord")
 
-            # ② チャンネル作成
-            channel = await guild.create_text_channel(
-                name="🎮-versuscord",
-                category=category
-            )
+                # ② チャンネル作成
+                channel = await guild.create_text_channel(
+                    name="🎮-versuscord",
+                    category=category
+                )
 
-            # ③ ボタン付きメッセージ送信
-            await channel.send(
-                "🎮 **Valorant プレイヤー登録**",
-                view=RegisterButtonView()
-            )
+                # ③ ボタン付きメッセージ送信
+                await channel.send(
+                    "🎮 **Valorant プレイヤー登録**",
+                    view=RegisterButtonView()
+                )
 
-            await channel.send(
-                "🚪 **マッチエントリー**\n参加したい場合はこちら",
-                view=MatchControlView()  # ← 既存のエントリーボタンView
-            )
+                await channel.send(
+                    "🚪 **マッチエントリー**\n参加したい場合はこちら",
+                    view=MatchControlView()  # ← 既存のエントリーボタンView
+                )
 
-            await channel.send(
-                "🌐 **グローバルマッチ**",
-                view=GlobalQueueView()  # ← 既存のグローバルマッチView
-            )
+                await channel.send(
+                    "🌐 **グローバルマッチ**",
+                    view=GlobalQueueView()  # ← 既存のグローバルマッチView
+                )
 
-            print(f"✅ VersusCord セットアップ完了: {guild.name}")
+                print(f"✅ VersusCord セットアップ完了: {guild.name}")
 
-    except discord.Forbidden:
-            print("❌ 権限不足：カテゴリ or チャンネル作成不可")
+        except discord.Forbidden:
+                print("❌ 権限不足：カテゴリ or チャンネル作成不可")
 
 
 @bot.event
