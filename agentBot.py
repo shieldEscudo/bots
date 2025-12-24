@@ -588,6 +588,10 @@ async def handle_match_leave(interaction: discord.Interaction):
 async def matchmaking_loop():
     for guild in bot.guilds:
         await try_match_players_by_rating(guild)
+@tasks.loop(seconds=10)
+async def global_matchmaking_loop():
+    await try_global_match(bot)
+
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -1765,6 +1769,8 @@ async def on_ready():
         
     if not matchmaking_loop.is_running():
         matchmaking_loop.start()
+    if not global_matchmaking_loop.is_running():
+        global_matchmaking_loop.start()
 
 # ========= 実行 =========
 if __name__ == "__main__":
