@@ -196,9 +196,7 @@ CREATE TABLE IF NOT EXISTS waiting_players (
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS in_match_players (
-  guild_id INTEGER,
-  user_id INTEGER,
-  PRIMARY KEY (guild_id, user_id)
+    id INTEGER PRIMARY KEY
 )
 """)
 
@@ -216,9 +214,9 @@ conn.commit()
 
 # ========= メモリ内データ =========
 user_data: Dict[int, int] = {}  # 表示用（= mu の整数丸め）
-waiting_players: Dict[int, List[int]] = {}
-current_matches: Dict[int, Dict[int, Dict[str, Any]]] = {}
-in_match_players: Dict[int, Set[int]] = {}
+waiting_players: List[int] = []
+current_matches: Dict[int, Dict[str, Any]] = {}
+in_match_players: Set[int] = set()
 
 # ---- ダミー用メンバー ----
 class DummyMember:
@@ -228,10 +226,6 @@ class DummyMember:
 
 # ========= ユーティリティ =========
 
-def ensure_guild_state(guild_id: int):
-    waiting_players.setdefault(guild_id, [])
-    current_matches.setdefault(guild_id, {})
-    in_match_players.setdefault(guild_id, set())
 
 def find_member_by_input(guild: discord.Guild, input_str: str | None, fallback_user: discord.User):
     """入力文字列からMemberを探す（display_name/username 部分一致、ID、メンション対応）。無指定なら自分"""
@@ -394,11 +388,9 @@ def save_in_match_players():
         cur.executemany("INSERT INTO in_match_players (id) VALUES (?)", [(p,) for p in in_match_players])
     conn.commit()
 
-def save_match(guild_id: int, match_id: int):
-    m = current_matches[guild_id].get(match_id)
-    if not m:
+def save_match(match_id: int):
+    if match_id not in current_matches:
         return
-
     m = current_matches[match_id]
     cur.execute("""INSERT OR REPLACE INTO matches 
         (match_id, guild_id, category_id, lobby_id, players, current_game, votes, is_dummy) 
@@ -420,33 +412,17 @@ def delete_match(match_id: int):
     conn.commit()
 
 def load_from_db():
-    # user_data
+    # mu を user_data 表示用に読み込む
     cur.execute("SELECT user_id, mu FROM users")
     for uid, mu in cur.fetchall():
         user_data[uid] = int(round(mu if mu is not None else DEFAULT_MU))
-
-    # waiting_players（※ guild別なのでここでは読み込まない）
-    # → 再起動後は待機リストは空にする
-
-    # in_match_players
-    cur.execute("SELECT guild_id, user_id FROM in_match_players")
-    for gid, uid in cur.fetchall():
-        ensure_guild_state(gid)
-        in_match_players[gid].add(uid)
-
-
-    # matches
-    cur.execute("""
-        SELECT match_id, guild_id, category_id, lobby_id, players,
-               current_game, votes, is_dummy
-        FROM matches
-    """)
-    for row in cur.fetchall():
-        match_id, guild_id, category_id, lobby_id, players_json, current_game, votes_json, is_dummy = row
-
-        ensure_guild_state(guild_id)
-
-        current_matches[guild_id][match_id] = {
+    cur.execute("SELECT id FROM waiting_players")
+    waiting_players.extend([row[0] for row in cur.fetchall()])
+    cur.execute("SELECT id FROM in_match_players")
+    in_match_players.update([row[0] for row in cur.fetchall()])
+    cur.execute("SELECT match_id, guild_id, category_id, lobby_id, players, current_game, votes, is_dummy FROM matches")
+    for (match_id, guild_id, category_id, lobby_id, players_json, current_game, votes_json, is_dummy) in cur.fetchall():
+        mi = {
             "guild_id": guild_id,
             "category_id": category_id,
             "players": deserialize_players(players_json),
@@ -456,6 +432,16 @@ def load_from_db():
             "votes": set(json.loads(votes_json) if votes_json else []),
             "is_dummy": bool(is_dummy)
         }
+        cur.execute("SELECT game_num, team_a, team_b, ch_a_id, ch_b_id FROM games WHERE match_id=? ORDER BY game_num ASC", (match_id,))
+        for gnum, ta, tb, ca, cb in cur.fetchall():
+            mi["games"].append({
+                "game_num": gnum,
+                "team_a": json.loads(ta) if ta else [],
+                "team_b": json.loads(tb) if tb else [],
+                "ch_a_id": ca,
+                "ch_b_id": cb
+            })
+        current_matches[match_id] = mi
 
 def build_result_message(guild: discord.Guild, mi: dict, aborted: bool = False) -> discord.Embed:
     """最終結果の順位表をEmbedで組み立てる"""
@@ -520,74 +506,81 @@ def build_result_message(guild: discord.Guild, mi: dict, aborted: bool = False) 
 
 # ========= 新: レート順マッチング関数 =========
 async def try_match_players_by_rating(guild: discord.Guild):
-    ensure_guild_state(guild.id)
-
-    wp = waiting_players[guild.id]
-    if len(wp) < PLAYERS_NEEDED:
+    global waiting_players
+    if len(waiting_players) < PLAYERS_NEEDED:
         return
-
     players_with_rating = []
-    for uid in wp:
+    for uid in waiting_players:
+        ensure_user_row(uid)
         r = get_user_trueskill(uid)
         players_with_rating.append((uid, r.mu))
-
     players_with_rating.sort(key=lambda x: x[1], reverse=True)
-
     while len(players_with_rating) >= PLAYERS_NEEDED:
-        group = players_with_rating[:PLAYERS_NEEDED]
+        group_ids = [uid for uid, _ in players_with_rating[:PLAYERS_NEEDED]]
         players_with_rating = players_with_rating[PLAYERS_NEEDED:]
-
-        group_ids = [uid for uid, _ in group]
-        waiting_players[guild.id] = [
-            uid for uid in waiting_players[guild.id] if uid not in group_ids
-        ]
-
-        members = [guild.get_member(uid) for uid in group_ids if guild.get_member(uid)]
-        await start_match_core(guild, members, is_dummy_mode=False)
+        waiting_players = [uid for uid in waiting_players if uid not in group_ids]
+        save_waiting_players()
+        group_members = [guild.get_member(uid) for uid in group_ids]
+        await start_match_core(guild, group_members, is_dummy_mode=False)
 
 # ==== 共通処理を関数に分離 ====
 async def handle_match_join(interaction: discord.Interaction):
-    guild = interaction.guild
+    
+    guild = interaction.guild or bot.get_guild(GUILD_ID)
     if not guild:
+        await interaction.response.send_message("⚠️ サーバーが見つかりません。", ephemeral=True)
         return
 
-    ensure_guild_state(guild.id)
+    member = guild.get_member(interaction.user.id)
+    if not member:
+        await interaction.response.send_message("⚠️ サーバーに参加していません。", ephemeral=True)
+        return
 
-    user_id = interaction.user.id
-
-    if user_id in in_match_players[guild.id]:
+    user_id = member.id
+    ensure_user_row(user_id)
+    if user_id in in_match_players:
         await interaction.response.send_message("現在進行中のマッチに参加中です。", ephemeral=True)
         return
-
-    if user_id in waiting_players[guild.id]:
-        await interaction.response.send_message("すでに待機中です。", ephemeral=True)
+    if user_id in waiting_players:
+        await interaction.response.send_message("すでに待機リストに入っています。", ephemeral=True)
         return
+    for match in current_matches.values():
+        if user_id in [p if isinstance(p, int) else (p.id if isinstance(p, discord.Member) else None) for p in match["players"]]:
+            await interaction.response.send_message("現在進行中のマッチに参加中です。", ephemeral=True)
+            return
 
-    waiting_players[guild.id].append(user_id)
-    await interaction.response.send_message("待機リストに参加しました", ephemeral=True)
+    waiting_players.append(user_id)
+    save_waiting_players()
+    await interaction.response.send_message(f"待機リストに参加しました",ephemeral=True)
 
 
 async def handle_match_leave(interaction: discord.Interaction):
-    guild = interaction.guild
+    guild = interaction.guild or bot.get_guild(GUILD_ID)
     if not guild:
+        await interaction.response.send_message("⚠️ サーバーが見つかりません。", ephemeral=True)
         return
 
-    ensure_guild_state(guild.id)
-
-    user_id = interaction.user.id
-
-    if user_id not in waiting_players[guild.id]:
-        await interaction.response.send_message("待機していません。", ephemeral=True)
+    member = guild.get_member(interaction.user.id)
+    if not member:
+        await interaction.response.send_message("⚠️ サーバーに参加していません。", ephemeral=True)
         return
 
-    waiting_players[guild.id].remove(user_id)
-    await interaction.response.send_message("待機リストから退出しました", ephemeral=True)
+    user_id = member.id
+    if user_id not in waiting_players:
+        await interaction.response.send_message("待機リストに入っていません。", ephemeral=True)
+        return
+
+    waiting_players.remove(user_id)
+    save_waiting_players()
+    await interaction.response.send_message(
+        f"待機リストから退出しました。",
+        ephemeral=True
+    )
 
 # ========= 定期チェックタスク =========
 @tasks.loop(seconds=MATCHMAKING_INTERVAL)
 async def matchmaking_loop():
     for guild in bot.guilds:
-        ensure_guild_state(guild.id)
         await try_match_players_by_rating(guild)
 
 @bot.event
@@ -751,21 +744,15 @@ async def match_leave(interaction: discord.Interaction):
 
 # ========= マッチ進行関連の関数 =========
 async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mode: bool):
-    parent_category = discord.utils.get(guild.categories, name="VersusCord")
-
-    if parent_category is None:
-        parent_category = await guild.create_category("VersusCord")
-
+    parent_category = guild.get_channel(PARENT_CHANNEL_ID)
     if not isinstance(parent_category, discord.CategoryChannel):
         print(f"カテゴリが見つからないか、IDがカテゴリではありません: {PARENT_CHANNEL_ID}")
         return
 
-    ensure_guild_state(guild.id)
-
+    # match_idの採番
     match_id = random.randint(1000, 9999)
-    while match_id in current_matches[guild.id]:
+    while match_id in current_matches:
         match_id = random.randint(1000, 9999)
-
 
     # 権限設定
     overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False)}
@@ -817,7 +804,7 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
         # await lobby.send(view=host_view)
 
     # マッチ情報を保存
-    current_matches[guild.id][match_id] = {
+    current_matches[match_id] = {
         "guild_id": guild.id,
         "category_id": parent_category.id,
         "players": players,
@@ -829,9 +816,7 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
     }
 
     for m in real_players:
-        ensure_guild_state(guild.id)
-        in_match_players[guild.id].add(m.id)
-
+        in_match_players.add(m.id)
         ensure_user_row(m.id)
     save_in_match_players()
 
@@ -839,19 +824,18 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
     bot.add_view(cancel_view)
     await lobby.send("⚠️ 対戦を中止する場合はこちら（5票で成立）", view=cancel_view)
 
-    # report_view = ReportButtonView(match_id)
-    # bot.add_view(report_view)
-    # await lobby.send("🚨 プレイヤーを通報する場合はこちら", view=report_view)
+    report_view = ReportButtonView(match_id)
+    bot.add_view(report_view)
+    await lobby.send("🚨 プレイヤーを通報する場合はこちら", view=report_view)
 
     await create_and_announce_game(guild, match_id, game_num=1)
     await send_vote_buttons(guild, match_id, game_num=1, lobby_id=lobby.id)
-    save_match(guild.id, match_id)
-
+    save_match(match_id)
 
 
 
 async def create_and_announce_game(guild: discord.Guild, match_id: int, game_num: int):
-    mi = current_matches[guild.id].get(match_id)
+    mi = current_matches.get(match_id)
     if not mi:
         return
 
@@ -957,13 +941,12 @@ async def create_and_announce_game(guild: discord.Guild, match_id: int, game_num
         f"チームB: {mentions_for(team_b_list)}\n"
     )
 
-    save_match(guild.id, match_id)
-
+    save_match(match_id)
 
 
 
 # async def cleanup_game_threads(guild: discord.Guild, match_id: int, game_num: int):
-#     mi = current_matches[guild.id].get(match_id)
+#     mi = current_matches.get(match_id)
 #     if not mi:
 #         return
 #     for g in mi.get("games", []):
@@ -977,7 +960,7 @@ async def create_and_announce_game(guild: discord.Guild, match_id: int, game_num
 #                         pass
 
 async def cleanup_game_threads(guild: discord.Guild, match_id: int, game_num: int):
-    mi = current_matches[guild.id].get(match_id)
+    mi = current_matches.get(match_id)
     if not mi:
         return
     for g in mi.get("games", []):
@@ -1001,7 +984,7 @@ async def send_vote_buttons(guild: discord.Guild, match_id: int, game_num: int, 
     await lobby.send(f"**試合 {game_num} の結果を登録してください**（8人中{VOTE_THRESHOLD}票で次へ）", view=view)
 
 async def end_match(guild: discord.Guild, match_id: int):
-    mi = current_matches[guild.id].get(match_id)
+    mi = current_matches.get(match_id)
     if not mi:
         return
 
@@ -1015,7 +998,7 @@ async def end_match(guild: discord.Guild, match_id: int):
 
     # 参加解除
     for m in real_members_only(guild, mi["players"]):
-        in_match_players[guild.id].discard(m.id)
+        in_match_players.discard(m.id)
     save_in_match_players()
 
     current_matches.pop(match_id, None)
@@ -1096,7 +1079,7 @@ class ResultButtonView(discord.ui.View):
         return False
 
     async def _handle_vote(self, interaction: discord.Interaction, result: str):
-        mi = current_matches[guild.id].get(self.match_id)
+        mi = current_matches.get(self.match_id)
         if not mi:
             await interaction.response.send_message("このマッチは存在しません。", ephemeral=True)
             return
@@ -1127,8 +1110,7 @@ class ResultButtonView(discord.ui.View):
         await interaction.response.send_message(
             f"投票を受け付けました（{len(mi['vote_results'])}/{VOTE_THRESHOLD}）", ephemeral=True
         )
-        save_match(guild.id, self.match_id)
-
+        save_match(self.match_id)
 
         if len(mi["vote_results"]) >= VOTE_THRESHOLD:
             winner = self._determine_winner(mi)
@@ -1140,8 +1122,7 @@ class ResultButtonView(discord.ui.View):
 
             if winner == "retry":
                 mi["vote_results"].clear()
-                save_match(guild.id, self.match_id)
-
+                save_match(self.match_id)
                 if is_textlike_channel(lobby):
                     await lobby.send(f"⚠️ 投票結果が不一致です。試合 {self.game_num} を再投票します。")
                 return
@@ -1174,8 +1155,7 @@ class ResultButtonView(discord.ui.View):
                 mi["vote_results"].clear()
                 await create_and_announce_game(guild, self.match_id, game_num=mi["current_game"])
                 await send_vote_buttons(guild, self.match_id, game_num=mi["current_game"], lobby_id=mi["lobby_id"])
-                save_match(guild.id, self.match_id)
-
+                save_match(self.match_id)
             else:
                 final_text = build_result_message(guild, mi, aborted=False)
 
@@ -1241,7 +1221,7 @@ class CancelMatchView(discord.ui.View):
                                         custom_id=f"match:{match_id}:cancel"))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        mi = current_matches[guild.id].get(self.match_id)
+        mi = current_matches.get(self.match_id)
         if not mi:
             await interaction.response.send_message("このマッチは存在しません。", ephemeral=True)
             return False
@@ -1351,52 +1331,52 @@ class HostLinkView(discord.ui.View):
             return
         await interaction.response.send_modal(HostLinkModal(self.host, self.lobby_channel))
 
-# class ReportButtonView(discord.ui.View):
-#     def __init__(self, match_id: int):
-#         super().__init__(timeout=None)
-#         self.match_id = match_id
-#         self.add_item(discord.ui.Button(label="🚨 通報", style=discord.ButtonStyle.secondary,
-#                                         custom_id=f"match:{match_id}:report"))
+class ReportButtonView(discord.ui.View):
+    def __init__(self, match_id: int):
+        super().__init__(timeout=None)
+        self.match_id = match_id
+        self.add_item(discord.ui.Button(label="🚨 通報", style=discord.ButtonStyle.secondary,
+                                        custom_id=f"match:{match_id}:report"))
 
-#     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-#         mi = current_matches[guild.id].get(self.match_id)
-#         if not mi:
-#             await interaction.response.send_message("このマッチは存在しません。", ephemeral=True)
-#             return False
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        mi = current_matches.get(self.match_id)
+        if not mi:
+            await interaction.response.send_message("このマッチは存在しません。", ephemeral=True)
+            return False
 
-#         # 対象プレイヤー一覧
-#         options = []
-#         for p in mi["players"]:
-#             uid = p.id if isinstance(p, discord.Member) else (p if isinstance(p, int) else None)
-#             if uid and uid > 0:
-#                 m = interaction.guild.get_member(uid)
-#                 if m:
-#                     options.append(discord.SelectOption(label=m.display_name, value=str(m.id)))
+        # 対象プレイヤー一覧
+        options = []
+        for p in mi["players"]:
+            uid = p.id if isinstance(p, discord.Member) else (p if isinstance(p, int) else None)
+            if uid and uid > 0:
+                m = interaction.guild.get_member(uid)
+                if m:
+                    options.append(discord.SelectOption(label=m.display_name, value=str(m.id)))
 
-#         if not options:
-#             await interaction.response.send_message("通報可能なプレイヤーが見つかりません。", ephemeral=True)
-#             return False
+        if not options:
+            await interaction.response.send_message("通報可能なプレイヤーが見つかりません。", ephemeral=True)
+            return False
 
-#         # ドロップダウンで対象を選ばせる
-#         select = discord.ui.Select(placeholder="通報対象を選んでください", options=options, min_values=1, max_values=1)
+        # ドロップダウンで対象を選ばせる
+        select = discord.ui.Select(placeholder="通報対象を選んでください", options=options, min_values=1, max_values=1)
 
-#         async def select_callback(inter: discord.Interaction):
-#             target_id = int(select.values[0])
-#             target = inter.guild.get_member(target_id)
-#             if not target:
-#                 await inter.response.send_message("対象が見つかりません。", ephemeral=True)
-#                 return
-#             view = discord.ui.View(timeout=60)
-#             view.add_item(ReportReasonSelect(inter.user, target, self.match_id))
-#             await inter.response.send_message(
-#                 f"{target.mention} を通報します。理由を選んでください：", view=view, ephemeral=True
-#             )
+        async def select_callback(inter: discord.Interaction):
+            target_id = int(select.values[0])
+            target = inter.guild.get_member(target_id)
+            if not target:
+                await inter.response.send_message("対象が見つかりません。", ephemeral=True)
+                return
+            view = discord.ui.View(timeout=60)
+            view.add_item(ReportReasonSelect(inter.user, target, self.match_id))
+            await inter.response.send_message(
+                f"{target.mention} を通報します。理由を選んでください：", view=view, ephemeral=True
+            )
 
-#         select.callback = select_callback
-#         view = discord.ui.View(timeout=30)
-#         view.add_item(select)
-#         await interaction.response.send_message("通報対象を選んでください：", view=view, ephemeral=True)
-#         return False
+        select.callback = select_callback
+        view = discord.ui.View(timeout=30)
+        view.add_item(select)
+        await interaction.response.send_message("通報対象を選んでください：", view=view, ephemeral=True)
+        return False
 
 # === ボタン定義（Persistent対応） ===
 class MatchControlView(discord.ui.View):
@@ -1596,7 +1576,7 @@ async def on_ready():
             view = ResultButtonView(match_id=match_id, game_num=mi["current_game"])
             bot.add_view(view)
             bot.add_view(CancelMatchView(match_id))
-            # bot.add_view(ReportButtonView(match_id))
+            bot.add_view(ReportButtonView(match_id))
             bot.add_view(RegisterButtonView())
         except Exception as e:
             print(f"PersistentView再登録失敗 match_id={match_id}: {e}")
