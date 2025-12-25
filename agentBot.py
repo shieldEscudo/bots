@@ -416,17 +416,33 @@ def delete_match(match_id: int):
     conn.commit()
 
 def load_from_db():
-    # mu を user_data 表示用に読み込む
+    # user_data
     cur.execute("SELECT user_id, mu FROM users")
     for uid, mu in cur.fetchall():
         user_data[uid] = int(round(mu if mu is not None else DEFAULT_MU))
-    cur.execute("SELECT id FROM waiting_players")
-    waiting_players.extend([row[0] for row in cur.fetchall()])
+
+    # waiting_players（※ guild別なのでここでは読み込まない）
+    # → 再起動後は待機リストは空にする
+
+    # in_match_players
     cur.execute("SELECT id FROM in_match_players")
-    in_match_players.update([row[0] for row in cur.fetchall()])
-    cur.execute("SELECT match_id, guild_id, category_id, lobby_id, players, current_game, votes, is_dummy FROM matches")
-    for (match_id, guild_id, category_id, lobby_id, players_json, current_game, votes_json, is_dummy) in cur.fetchall():
-        mi = {
+    for (uid,) in cur.fetchall():
+        for guild in bot.guilds:
+            ensure_guild_state(guild.id)
+            in_match_players[guild.id].add(uid)
+
+    # matches
+    cur.execute("""
+        SELECT match_id, guild_id, category_id, lobby_id, players,
+               current_game, votes, is_dummy
+        FROM matches
+    """)
+    for row in cur.fetchall():
+        match_id, guild_id, category_id, lobby_id, players_json, current_game, votes_json, is_dummy = row
+
+        ensure_guild_state(guild_id)
+
+        current_matches[guild_id][match_id] = {
             "guild_id": guild_id,
             "category_id": category_id,
             "players": deserialize_players(players_json),
@@ -436,16 +452,6 @@ def load_from_db():
             "votes": set(json.loads(votes_json) if votes_json else []),
             "is_dummy": bool(is_dummy)
         }
-        cur.execute("SELECT game_num, team_a, team_b, ch_a_id, ch_b_id FROM games WHERE match_id=? ORDER BY game_num ASC", (match_id,))
-        for gnum, ta, tb, ca, cb in cur.fetchall():
-            mi["games"].append({
-                "game_num": gnum,
-                "team_a": json.loads(ta) if ta else [],
-                "team_b": json.loads(tb) if tb else [],
-                "ch_a_id": ca,
-                "ch_b_id": cb
-            })
-        current_matches[match_id] = mi
 
 def build_result_message(guild: discord.Guild, mi: dict, aborted: bool = False) -> discord.Embed:
     """最終結果の順位表をEmbedで組み立てる"""
