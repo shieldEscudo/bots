@@ -68,6 +68,17 @@ VOTE_THRESHOLD = 1                            # 8人中5票で進行
 DB_PATH = "match.db"
 
 MATCHMAKING_INTERVAL = 30
+VALORANT_RANK_TO_MU = {
+    "Iron": 18.0,
+    "Bronze": 20.0,
+    "Silver": 22.0,
+    "Gold": 24.0,
+    "Platinum": 26.0,
+    "Diamond": 28.0,
+    "Ascendant": 30.0,
+    "Immortal": 32.0,
+    "Radiant": 34.0,
+}
 
 # ========= Koyeb スリープ対策設定 =========
 # 💡 サービス作成後に発行されるBotの公開URLを環境変数から取得
@@ -1415,39 +1426,71 @@ class RegisterModal(discord.ui.Modal, title="Valorant 登録フォーム"):
         super().__init__()
         self.rank = rank
 
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            async with interaction.client.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO valorant_players
-                    (discord_id, valorant_name, valorant_tag, rank)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (discord_id)
-                    DO UPDATE SET
-                        valorant_name = EXCLUDED.valorant_name,
-                        valorant_tag = EXCLUDED.valorant_tag,
-                        rank = EXCLUDED.rank,
-                        updated_at = CURRENT_TIMESTAMP;
-                    """,
-                    interaction.user.id,
-                    self.valorant_name.value,
-                    self.valorant_tag.value,
-                    self.rank
+async def on_submit(self, interaction: discord.Interaction):
+    try:
+        rank = self.rank
+        initial_mu = VALORANT_RANK_TO_MU.get(rank, DEFAULT_MU)
+
+        async with interaction.client.pool.acquire() as conn:
+            # Valorant情報保存
+            await conn.execute(
+                """
+                INSERT INTO valorant_players
+                (discord_id, valorant_name, valorant_tag, rank)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (discord_id)
+                DO UPDATE SET
+                    valorant_name = EXCLUDED.valorant_name,
+                    valorant_tag = EXCLUDED.valorant_tag,
+                    rank = EXCLUDED.rank,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                interaction.user.id,
+                self.valorant_name.value,
+                self.valorant_tag.value,
+                rank
+            )
+
+        # ===== TrueSkill 初期値設定 =====
+        user_id = interaction.user.id
+
+        cur.execute(
+            "SELECT mu, games FROM users WHERE user_id=?",
+            (user_id,)
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            # まだ users に存在しない → 初期ランク反映
+            cur.execute(
+                "INSERT INTO users (user_id, mu, sigma, wins, games) VALUES (?,?,?,?,?)",
+                (user_id, initial_mu, DEFAULT_SIGMA, 0, 0)
+            )
+            conn.commit()
+
+        else:
+            mu, games = row
+            # まだ1試合もしていない場合のみ上書き
+            if games == 0:
+                cur.execute(
+                    "UPDATE users SET mu=? WHERE user_id=?",
+                    (initial_mu, user_id)
                 )
+                conn.commit()
 
-            await interaction.response.send_message(
-                f"✅ 登録完了！\n"
-                f"{self.valorant_name.value}#{self.valorant_tag.value}\n"
-                f"ランク: **{self.rank}**",
-                ephemeral=True
-            )
+        await interaction.response.send_message(
+            f"✅ 登録完了！\n"
+            f"{self.valorant_name.value}#{self.valorant_tag.value}\n"
+            f"ランク: **{rank}**\n"
+            f"初期レートを設定しました",
+            ephemeral=True
+        )
 
-        except Exception as e:
-            await interaction.response.send_message(
-                f"⚠️ 登録中にエラーが発生しました\n```\n{e}\n```",
-                ephemeral=True
-            )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"⚠️ 登録中にエラーが発生しました\n```\n{e}\n```",
+            ephemeral=True
+        )
 
 
 # ===============================
