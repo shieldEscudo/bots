@@ -196,7 +196,9 @@ CREATE TABLE IF NOT EXISTS waiting_players (
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS in_match_players (
-    id INTEGER PRIMARY KEY
+  guild_id INTEGER,
+  user_id INTEGER,
+  PRIMARY KEY (guild_id, user_id)
 )
 """)
 
@@ -392,9 +394,11 @@ def save_in_match_players():
         cur.executemany("INSERT INTO in_match_players (id) VALUES (?)", [(p,) for p in in_match_players])
     conn.commit()
 
-def save_match(match_id: int):
-    if match_id not in current_matches:
+def save_match(guild_id: int, match_id: int):
+    m = current_matches[guild_id].get(match_id)
+    if not m:
         return
+
     m = current_matches[match_id]
     cur.execute("""INSERT OR REPLACE INTO matches 
         (match_id, guild_id, category_id, lobby_id, players, current_game, votes, is_dummy) 
@@ -425,11 +429,11 @@ def load_from_db():
     # → 再起動後は待機リストは空にする
 
     # in_match_players
-    cur.execute("SELECT id FROM in_match_players")
-    for (uid,) in cur.fetchall():
-        for guild in bot.guilds:
-            ensure_guild_state(guild.id)
-            in_match_players[guild.id].add(uid)
+    cur.execute("SELECT guild_id, user_id FROM in_match_players")
+    for gid, uid in cur.fetchall():
+        ensure_guild_state(gid)
+        in_match_players[gid].add(uid)
+
 
     # matches
     cur.execute("""
@@ -756,10 +760,12 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
         print(f"カテゴリが見つからないか、IDがカテゴリではありません: {PARENT_CHANNEL_ID}")
         return
 
-    # match_idの採番
+    ensure_guild_state(guild.id)
+
     match_id = random.randint(1000, 9999)
-    while match_id in current_matches:
+    while match_id in current_matches[guild.id]:
         match_id = random.randint(1000, 9999)
+
 
     # 権限設定
     overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False)}
@@ -823,7 +829,9 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
     }
 
     for m in real_players:
-        in_match_players.add(m.id)
+        ensure_guild_state(guild.id)
+        in_match_players[guild.id].add(m.id)
+
         ensure_user_row(m.id)
     save_in_match_players()
 
@@ -837,7 +845,8 @@ async def start_match_core(guild: discord.Guild, players: List[Any], is_dummy_mo
 
     await create_and_announce_game(guild, match_id, game_num=1)
     await send_vote_buttons(guild, match_id, game_num=1, lobby_id=lobby.id)
-    save_match(match_id)
+    save_match(guild.id, match_id)
+
 
 
 
@@ -948,7 +957,8 @@ async def create_and_announce_game(guild: discord.Guild, match_id: int, game_num
         f"チームB: {mentions_for(team_b_list)}\n"
     )
 
-    save_match(match_id)
+    save_match(guild.id, match_id)
+
 
 
 
@@ -1005,7 +1015,7 @@ async def end_match(guild: discord.Guild, match_id: int):
 
     # 参加解除
     for m in real_members_only(guild, mi["players"]):
-        in_match_players.discard(m.id)
+        in_match_players[guild.id].discard(m.id)
     save_in_match_players()
 
     current_matches.pop(match_id, None)
@@ -1117,7 +1127,8 @@ class ResultButtonView(discord.ui.View):
         await interaction.response.send_message(
             f"投票を受け付けました（{len(mi['vote_results'])}/{VOTE_THRESHOLD}）", ephemeral=True
         )
-        save_match(self.match_id)
+        save_match(guild.id, self.match_id)
+
 
         if len(mi["vote_results"]) >= VOTE_THRESHOLD:
             winner = self._determine_winner(mi)
@@ -1129,7 +1140,8 @@ class ResultButtonView(discord.ui.View):
 
             if winner == "retry":
                 mi["vote_results"].clear()
-                save_match(self.match_id)
+                save_match(guild.id, self.match_id)
+
                 if is_textlike_channel(lobby):
                     await lobby.send(f"⚠️ 投票結果が不一致です。試合 {self.game_num} を再投票します。")
                 return
@@ -1162,7 +1174,8 @@ class ResultButtonView(discord.ui.View):
                 mi["vote_results"].clear()
                 await create_and_announce_game(guild, self.match_id, game_num=mi["current_game"])
                 await send_vote_buttons(guild, self.match_id, game_num=mi["current_game"], lobby_id=mi["lobby_id"])
-                save_match(self.match_id)
+                save_match(guild.id, self.match_id)
+
             else:
                 final_text = build_result_message(guild, mi, aborted=False)
 
